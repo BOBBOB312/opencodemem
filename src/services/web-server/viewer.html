@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenCodeMem Viewer</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; }
+    .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+    header { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    h1 { font-size: 24px; margin-bottom: 10px; }
+    .stats { display: flex; gap: 20px; margin-top: 15px; }
+    .stat { background: #f0f0f0; padding: 10px 15px; border-radius: 6px; }
+    .stat-label { font-size: 12px; color: #666; }
+    .stat-value { font-size: 24px; font-weight: bold; }
+    .search-box { margin: 20px 0; display: flex; gap: 10px; }
+    .search-box input { flex: 1; padding: 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
+    .search-box button { padding: 12px 24px; background: #007acc; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+    .search-box button:hover { background: #005999; }
+    .tabs { display: flex; gap: 10px; margin-bottom: 20px; }
+    .tab { padding: 10px 20px; background: #fff; border: 1px solid #ddd; border-radius: 6px; cursor: pointer; }
+    .tab.active { background: #007acc; color: #fff; border-color: #007acc; }
+    .results { background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .result-item { padding: 15px; border-bottom: 1px solid #eee; cursor: pointer; }
+    .result-item:hover { background: #f9f9f9; }
+    .result-item:last-child { border-bottom: none; }
+    .result-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .result-title { font-weight: 600; }
+    .result-type { font-size: 12px; padding: 3px 8px; background: #e0e0e0; border-radius: 4px; }
+    .result-snippet { font-size: 14px; color: #666; }
+    .result-meta { font-size: 12px; color: #999; margin-top: 8px; }
+    .empty { padding: 40px; text-align: center; color: #999; }
+    .modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); align-items: center; justify-content: center; }
+    .modal.show { display: flex; }
+    .modal-content { background: #fff; border-radius: 8px; padding: 24px; max-width: 600px; width: 90%; max-height: 80vh; overflow-y: auto; }
+    .modal-header { display: flex; justify-content: space-between; margin-bottom: 16px; }
+    .modal-close { background: none; border: none; font-size: 24px; cursor: pointer; }
+    .loading { padding: 20px; text-align: center; color: #666; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🧠 OpenCodeMem Viewer</h1>
+      <div class="stats">
+        <div class="stat"><div class="stat-label">Sessions</div><div class="stat-value" id="stat-sessions">-</div></div>
+        <div class="stat"><div class="stat-label">Observations</div><div class="stat-value" id="stat-observations">-</div></div>
+        <div class="stat"><div class="stat-label">Memories</div><div class="stat-value" id="stat-memories">-</div></div>
+        <div class="stat"><div class="stat-label">Vectors</div><div class="stat-value" id="stat-vectors">-</div></div>
+      </div>
+    </header>
+
+    <div class="search-box">
+      <input type="text" id="project-input" placeholder="Project (optional)" style="max-width:260px" />
+      <input type="text" id="search-input" placeholder="Search memories..." />
+      <button onclick="search()">Search</button>
+    </div>
+
+    <div class="tabs">
+      <button class="tab active" onclick="showTab('memories', event)">Memories</button>
+      <button class="tab" onclick="showTab('diagnostics', event)">Diagnostics</button>
+    </div>
+
+    <div class="results" id="results">
+      <div class="empty">Enter a search query to find memories</div>
+    </div>
+  </div>
+
+  <div class="modal" id="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 id="modal-title"></h2>
+        <button class="modal-close" onclick="closeModal()">&times;</button>
+      </div>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = window.location.origin;
+    let currentTab = 'memories';
+
+    async function loadStats() {
+      try {
+        const res = await fetch(`${API_BASE}/api/stats`);
+        const data = await res.json();
+        document.getElementById('stat-sessions').textContent = data.sessions || 0;
+        document.getElementById('stat-observations').textContent = data.observations || 0;
+        document.getElementById('stat-memories').textContent = data.memories || 0;
+        document.getElementById('stat-vectors').textContent = data.vectors || 0;
+      } catch (e) {
+        console.error('Failed to load stats:', e);
+      }
+    }
+
+    async function search() {
+      const query = document.getElementById('search-input').value.trim();
+      const project = document.getElementById('project-input').value.trim();
+      const resultsDiv = document.getElementById('results');
+      
+      if (!query) {
+        resultsDiv.innerHTML = '<div class="empty">Enter a search query to find memories</div>';
+        return;
+      }
+
+      resultsDiv.innerHTML = '<div class="loading">Searching...</div>';
+
+      try {
+        const params = new URLSearchParams({ query, limit: '20' });
+        if (project) params.set('project', project);
+        const res = await fetch(`${API_BASE}/api/search?${params.toString()}`);
+        const data = await res.json();
+        
+        if (!data.results || data.results.length === 0) {
+          resultsDiv.innerHTML = '<div class="empty">No results found</div>';
+          return;
+        }
+
+        resultsDiv.innerHTML = data.results.map(r => `
+          <div class="result-item" onclick="showDetail(${JSON.stringify(r).replace(/"/g, '&quot;')}, '${project.replace(/'/g, "\\'")}')">
+            <div class="result-header">
+              <span class="result-title">${r.title || 'Untitled'}</span>
+              <span class="result-type">${r.type || 'general'}</span>
+            </div>
+            <div class="result-snippet">${r.snippet || ''}</div>
+            <div class="result-meta">ID: ${r.id} • Similarity: ${r.similarity}%</div>
+          </div>
+        `).join('');
+      } catch (e) {
+        resultsDiv.innerHTML = '<div class="empty">Error: ' + e.message + '</div>';
+      }
+    }
+
+    async function showTab(tab, evt) {
+      currentTab = tab;
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      if (evt && evt.target) evt.target.classList.add('active');
+      
+      const resultsDiv = document.getElementById('results');
+      resultsDiv.innerHTML = '<div class="loading">Loading...</div>';
+
+      if (tab === 'diagnostics') {
+        try {
+          const [statsRes, queueRes] = await Promise.all([
+            fetch(`${API_BASE}/api/stats`),
+            fetch(`${API_BASE}/api/diagnostics/queue`),
+          ]);
+          const stats = await statsRes.json();
+          const queue = await queueRes.json();
+
+          resultsDiv.innerHTML = `
+            <div class="result-item" style="cursor:default">
+              <div class="result-title">API Metrics</div>
+              <pre style="white-space:pre-wrap;background:#f5f5f5;padding:12px;border-radius:4px;margin-top:8px">${JSON.stringify(stats.apiMetrics || {}, null, 2)}</pre>
+            </div>
+            <div class="result-item" style="cursor:default">
+              <div class="result-title">Embedding Queue</div>
+              <pre style="white-space:pre-wrap;background:#f5f5f5;padding:12px;border-radius:4px;margin-top:8px">${JSON.stringify(queue.embeddingQueue || {}, null, 2)}</pre>
+            </div>
+            <div class="result-item" style="cursor:default">
+              <div class="result-title">Dead Letters (latest 20)</div>
+              <pre style="white-space:pre-wrap;background:#f5f5f5;padding:12px;border-radius:4px;margin-top:8px">${JSON.stringify(queue.deadLetters || [], null, 2)}</pre>
+            </div>
+          `;
+          return;
+        } catch (e) {
+          resultsDiv.innerHTML = '<div class="empty">Diagnostics unavailable: ' + e.message + '</div>';
+          return;
+        }
+      }
+
+      try {
+        const project = document.getElementById('project-input').value.trim();
+        const params = new URLSearchParams({ limit: '50' });
+        if (project) params.set('project', project);
+        const res = await fetch(`${API_BASE}/api/memory/list?${params.toString()}`);
+        const data = await res.json();
+        
+        if (!data.memories || data.memories.length === 0) {
+          resultsDiv.innerHTML = '<div class="empty">No memories found</div>';
+          return;
+        }
+
+        resultsDiv.innerHTML = data.memories.map(m => `
+          <div class="result-item" onclick="showMemoryDetail(${JSON.stringify(m).replace(/"/g, '&quot;')})">
+            <div class="result-header">
+              <span class="result-title">${m.type || 'general'}</span>
+              <span class="result-type">${m.id.substring(0, 8)}</span>
+            </div>
+            <div class="result-snippet">${m.summary || m.content?.substring(0, 150)}</div>
+            <div class="result-meta">${new Date(m.createdAt).toLocaleString()}</div>
+          </div>
+        `).join('');
+      } catch (e) {
+        resultsDiv.innerHTML = '<div class="empty">Error: ' + e.message + '</div>';
+      }
+    }
+
+    async function showDetail(result, project) {
+      let timelineHtml = '<p style="color:#999">Timeline unavailable</p>';
+      try {
+        const params = new URLSearchParams({ anchor: String(result.id), depth_before: '2', depth_after: '2' });
+        if (project) params.set('project', project);
+        const timelineRes = await fetch(`${API_BASE}/api/timeline?${params.toString()}`);
+        const timeline = await timelineRes.json();
+        timelineHtml = `<pre style="white-space: pre-wrap; background: #f5f5f5; padding: 12px; border-radius: 4px;">${JSON.stringify({ before: timeline.before || [], after: timeline.after || [], prompts: timeline.prompts || [] }, null, 2)}</pre>`;
+      } catch {
+        // no-op
+      }
+
+      document.getElementById('modal-title').textContent = result.title || 'Observation';
+      document.getElementById('modal-body').innerHTML = `
+        <p><strong>Type:</strong> ${result.type || 'general'}</p>
+        <p><strong>ID:</strong> ${result.id}</p>
+        <p><strong>Similarity:</strong> ${result.similarity}%</p>
+        <p><strong>Date:</strong> ${result.created_at_epoch ? new Date(result.created_at_epoch).toLocaleString() : 'N/A'}</p>
+        <hr style="margin: 16px 0">
+        <pre style="white-space: pre-wrap; background: #f5f5f5; padding: 12px; border-radius: 4px;">${result.snippet || result.text || ''}</pre>
+        <h3 style="margin-top:16px">Timeline Context</h3>
+        ${timelineHtml}
+      `;
+      document.getElementById('modal').classList.add('show');
+    }
+
+    function showMemoryDetail(memory) {
+      document.getElementById('modal-title').textContent = 'Memory Detail';
+      document.getElementById('modal-body').innerHTML = `
+        <p><strong>ID:</strong> ${memory.id}</p>
+        <p><strong>Type:</strong> ${memory.type || 'general'}</p>
+        <p><strong>Created:</strong> ${new Date(memory.createdAt).toLocaleString()}</p>
+        <hr style="margin: 16px 0">
+        <pre style="white-space: pre-wrap; background: #f5f5f5; padding: 12px; border-radius: 4px;">${memory.content || ''}</pre>
+      `;
+      document.getElementById('modal').classList.add('show');
+    }
+
+    function closeModal() {
+      document.getElementById('modal').classList.remove('show');
+    }
+
+    document.getElementById('search-input').addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') search();
+    });
+
+    loadStats();
+    showTab('memories', null);
+  </script>
+</body>
+</html>
