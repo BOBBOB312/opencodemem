@@ -3,12 +3,48 @@ import { getConfig } from "../config.js";
 import { getTags } from "./tags.js";
 import { memoryClient } from "./worker-client.js";
 import { logger } from "./logger.js";
-import { sanitizeForStorage, stripPrivateContent } from "./privacy.js";
+import { sanitizeForStorage } from "./privacy.js";
 
 interface ToolInfo {
   name: string;
   input: any;
   output?: any;
+}
+
+export type AutoCaptureTrigger = "idle" | "first_prompt" | "session_start" | "compaction";
+
+export interface AutoCaptureOptions {
+  trigger?: AutoCaptureTrigger;
+  forceWithoutTools?: boolean;
+  sourceText?: string;
+}
+
+function getTriggerLabel(trigger: AutoCaptureTrigger): string {
+  switch (trigger) {
+    case "session_start":
+      return "session start";
+    case "first_prompt":
+      return "first prompt";
+    case "compaction":
+      return "compaction";
+    case "idle":
+    default:
+      return "idle";
+  }
+}
+
+function getFallbackTitle(trigger: AutoCaptureTrigger): string {
+  switch (trigger) {
+    case "session_start":
+      return "Session started";
+    case "first_prompt":
+      return "First prompt captured";
+    case "compaction":
+      return "Compaction checkpoint";
+    case "idle":
+    default:
+      return "Idle checkpoint";
+  }
 }
 
 function extractFilePaths(toolInput: any): string[] {
@@ -80,9 +116,11 @@ function extractFacts(toolOutput: any): string[] {
 export async function performAutoCapture(
   ctx: PluginInput,
   sessionID: string,
-  projectPath: string
+  projectPath: string,
+  options: AutoCaptureOptions = {}
 ): Promise<void> {
   const config = getConfig();
+  const trigger = options.trigger || "idle";
   
   if (!config.autoCaptureEnabled) {
     return;
@@ -109,25 +147,44 @@ export async function performAutoCapture(
           }))
       );
 
-    if (recentTools.length === 0) {
+    if (recentTools.length === 0 && !options.forceWithoutTools) {
       return;
     }
 
-    const uniqueTools = [...new Set(recentTools.map((t: ToolInfo) => t.name))];
-    const toolNames = uniqueTools.join(", ");
-    
-    const filesRead = [...new Set(
-      recentTools.flatMap((t: ToolInfo) => extractFilePaths(t.input))
-    )];
+    const latestUserMessage = options.sourceText || messages
+      .filter((m) => m.info?.role === "user" && m.parts)
+      .flatMap((m) =>
+        m.parts
+          .filter((p: any) => p.type === "text" && p.synthetic !== true)
+          .map((p: any) => p.text)
+      )
+      .filter((text: string) => !!text && text.trim().length > 0)
+      .slice(-1)[0];
 
-    const obsType = recentTools.length > 0 
-      ? inferObservationType(recentTools[0].name, recentTools[0].input)
-      : "workflow";
+    let toolNames = "";
+    let filesRead: string[] = [];
+    let obsType = "workflow";
+    let title = getFallbackTitle(trigger);
+    let subtitle = `Trigger: ${getTriggerLabel(trigger)}`;
+    let facts: string[] = [];
+    let content = `Session checkpoint captured during ${getTriggerLabel(trigger)}.`;
 
-    const title = generateObservationTitle(uniqueTools[0], recentTools[0]?.input);
-    const facts = recentTools.flatMap((t: ToolInfo) => extractFacts(t.input));
-
-    const content = `Session used tools: ${toolNames}. Working with ${filesRead.length} files.`;
+    if (recentTools.length > 0) {
+      const uniqueTools = [...new Set(recentTools.map((t: ToolInfo) => t.name))];
+      toolNames = uniqueTools.join(", ");
+      filesRead = [...new Set(
+        recentTools.flatMap((t: ToolInfo) => extractFilePaths(t.input))
+      )];
+      obsType = inferObservationType(recentTools[0].name, recentTools[0].input);
+      title = generateObservationTitle(uniqueTools[0], recentTools[0]?.input);
+      subtitle = `Trigger: ${getTriggerLabel(trigger)} | Tools: ${toolNames}`;
+      facts = recentTools.flatMap((t: ToolInfo) => extractFacts(t.input));
+      content = `Triggered by ${getTriggerLabel(trigger)}. Session used tools: ${toolNames}. Working with ${filesRead.length} files.`;
+    } else if (latestUserMessage) {
+      const compactMessage = latestUserMessage.replace(/\s+/g, " ").trim().slice(0, 300);
+      facts = [compactMessage];
+      content = `Triggered by ${getTriggerLabel(trigger)}. User intent snapshot: ${compactMessage}`;
+    }
 
     const sanitized = sanitizeForStorage(content);
 
@@ -138,7 +195,7 @@ export async function performAutoCapture(
       data: {
         type: obsType,
         title,
-        subtitle: `Tools: ${toolNames}`,
+        subtitle,
         text: sanitized,
         facts: facts.slice(0, 8),
         files_read: filesRead.slice(0, 20),
@@ -151,6 +208,7 @@ export async function performAutoCapture(
       type: obsType,
       metadata: {
         sessionID,
+        trigger,
         toolCount: recentTools.length,
         toolNames,
         filesRead: filesRead.slice(0, 10),
@@ -160,6 +218,7 @@ export async function performAutoCapture(
 
     logger.info("AUTO_CAPTURE", "Captured session activity", { 
       sessionID, 
+      trigger,
       toolCount: recentTools.length,
       type: obsType,
     });

@@ -18,9 +18,28 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
   let webServer: any = null;
   let idleTimeout: Timer | null = null;
   const ACTIVE_SESSIONS_KEY = Symbol.for("opencodemem.active.sessions");
+  const FIRST_PROMPT_CAPTURED_KEY = Symbol.for("opencodemem.first.prompt.captured");
+  const CAPTURE_DEBOUNCE_KEY = Symbol.for("opencodemem.capture.debounce.state");
+  const COMPACTION_CAPTURE_DEBOUNCE_MS = 60_000;
   const activeSessions: Set<string> =
     ((globalThis as any)[ACTIVE_SESSIONS_KEY] as Set<string> | undefined) || new Set<string>();
+  const firstPromptCaptured: Set<string> =
+    ((globalThis as any)[FIRST_PROMPT_CAPTURED_KEY] as Set<string> | undefined) || new Set<string>();
+  const captureDebounceState: Map<string, number> =
+    ((globalThis as any)[CAPTURE_DEBOUNCE_KEY] as Map<string, number> | undefined) || new Map<string, number>();
   (globalThis as any)[ACTIVE_SESSIONS_KEY] = activeSessions;
+  (globalThis as any)[FIRST_PROMPT_CAPTURED_KEY] = firstPromptCaptured;
+  (globalThis as any)[CAPTURE_DEBOUNCE_KEY] = captureDebounceState;
+
+  function isCaptureDebounced(key: string, debounceMs: number): boolean {
+    const now = Date.now();
+    const lastCapturedAt = captureDebounceState.get(key);
+    if (lastCapturedAt && now - lastCapturedAt < debounceMs) {
+      return true;
+    }
+    captureDebounceState.set(key, now);
+    return false;
+  }
 
   if (!isConfigured()) {
   }
@@ -102,6 +121,12 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
           });
           if (sessionResult.success) {
             activeSessions.add(input.sessionID);
+            performAutoCapture(ctx, input.sessionID, directory, {
+              trigger: "session_start",
+              forceWithoutTools: true,
+            }).catch((error) => {
+              log("session_start auto capture error", { error: String(error) });
+            });
           }
         }
 
@@ -131,6 +156,17 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
           CONFIG.chatMessage?.injectOn === "always" ||
           !hasNonSyntheticUserMessages ||
           isAfterCompaction;
+
+        if (!hasNonSyntheticUserMessages && !firstPromptCaptured.has(input.sessionID)) {
+          firstPromptCaptured.add(input.sessionID);
+          performAutoCapture(ctx, input.sessionID, directory, {
+            trigger: "first_prompt",
+            forceWithoutTools: true,
+            sourceText: userMessage,
+          }).catch((error) => {
+            log("first_prompt auto capture error", { error: String(error) });
+          });
+        }
 
         if (!shouldInject) return;
 
@@ -372,7 +408,7 @@ Use 'add' to store knowledge, 'list' to view memories.`,
 
         idleTimeout = setTimeout(async () => {
           try {
-            await performAutoCapture(ctx, sessionID, directory);
+            await performAutoCapture(ctx, sessionID, directory, { trigger: "idle" });
           } catch (error) {
             log("Idle processing error", { error: String(error) });
           } finally {
@@ -408,6 +444,18 @@ Use 'add' to store knowledge, 'list' to view memories.`,
           });
 
           log("Compaction memory injected", { sessionID, count: memoriesResult.results.length });
+
+          const compactionCaptureKey = `${sessionID}:compaction`;
+          if (!isCaptureDebounced(compactionCaptureKey, COMPACTION_CAPTURE_DEBOUNCE_MS)) {
+            performAutoCapture(ctx, sessionID, directory, {
+              trigger: "compaction",
+              forceWithoutTools: true,
+            }).catch((error) => {
+              log("Compaction auto capture error", { error: String(error) });
+            });
+          } else {
+            log("Compaction auto capture skipped (debounced)", { sessionID });
+          }
         } catch (error) {
           log("Compaction handler error", { error: String(error) });
         }
@@ -431,6 +479,12 @@ Use 'add' to store knowledge, 'list' to view memories.`,
           status: "completed",
         });
         activeSessions.delete(sessionID);
+        firstPromptCaptured.delete(sessionID);
+        for (const key of captureDebounceState.keys()) {
+          if (key.startsWith(`${sessionID}:`)) {
+            captureDebounceState.delete(key);
+          }
+        }
       }
     },
   };
